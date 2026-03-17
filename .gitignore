@@ -1,4 +1,5 @@
 .env
+.DS_Store
 *.db
 resume_base.pdf
 tailored_resumes/
