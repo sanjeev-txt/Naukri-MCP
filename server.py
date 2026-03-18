@@ -36,6 +36,8 @@ class NaukriMCPServer:
             willing_to_relocate=os.getenv("CANDIDATE_WILLING_TO_RELOCATE", "true").lower() == "true",
             skills=[s.strip() for s in os.getenv("CANDIDATE_SKILLS", "").split(",") if s.strip()],
         )
+        from analyzer import RejectionAnalyzer
+        self.analyzer = RejectionAnalyzer(self.candidate_profile)
 
     async def start(self):
         await self.tracker.init()
@@ -72,7 +74,20 @@ class NaukriMCPServer:
     ) -> list[dict]:
         jobs = await self.browser.search_jobs(title, location, experience, skills, max_results)
         for job in jobs:
+            # Compute match score and gap vs candidate profile
+            if job.skills_required and self.candidate_profile.skills:
+                job.match_score = self.analyzer.compute_match_score(
+                    job.skills_required, self.candidate_profile.skills
+                )
+                gap = self.analyzer.compute_gap(job.skills_required, self.candidate_profile.skills)
+            else:
+                job.match_score = None
+                gap = []
             await self.tracker.save_job(job)
+            if gap:
+                await self.tracker.save_skills_gap(job.id, gap, job.match_score or 0)
+        # Sort by match score descending
+        jobs.sort(key=lambda j: j.match_score or 0, reverse=True)
         return [j.model_dump(mode="json") for j in jobs]
 
     async def _get_job_details(self, job_id: str) -> dict:
@@ -226,6 +241,12 @@ class NaukriMCPServer:
         if await self.tracker.is_duplicate(job_id):
             return {"success": False, "error": f"Already applied to job {job_id}"}
 
+        # Compute and store skills gap AFTER guards, BEFORE applying
+        if job.skills_required:
+            gap = self.analyzer.compute_gap(job.skills_required, self.candidate_profile.skills)
+            score = self.analyzer.compute_match_score(job.skills_required, self.candidate_profile.skills)
+            await self.tracker.save_skills_gap(job.id, gap, score)
+
         try:
             result = await self.browser.apply_to_job(job.url, dry_run=dry_run)
         except CaptchaError as e:
@@ -327,6 +348,53 @@ class NaukriMCPServer:
             "total_checked": len(applied_jobs),
             "updated": updated,
             "message": f"Synced {len(applied_jobs)} applications. {len(updated)} status change(s) found.",
+        }
+
+    async def _analyze_rejections(self, since_days: int = 30) -> dict:
+        """Analyze all applied jobs to surface rejection patterns."""
+        from datetime import timedelta
+        since_date = (datetime.now() - timedelta(days=since_days)).isoformat()
+        applied_jobs = await self.tracker.list_jobs(status="applied", since_date=since_date)
+        if not applied_jobs:
+            return {"message": f"No applied jobs found in the last {since_days} days."}
+        return self.analyzer.analyze(applied_jobs)
+
+    async def _suggest_improvements(self) -> dict:
+        """Aggregate all time rejection data and return resume + profile improvements."""
+        applied_jobs = await self.tracker.list_jobs(status="applied")
+        if not applied_jobs:
+            return {"message": "No applied jobs in tracker yet. Apply to some jobs first."}
+
+        analysis = self.analyzer.analyze(applied_jobs)
+
+        strategy = []
+        if analysis["ats_issue"]:
+            strategy.append(
+                f"{analysis['never_viewed']} of your applications were never viewed. "
+                "This is an ATS keyword issue — add missing skills to your resume headline and skills section."
+            )
+        if analysis["content_issue"]:
+            strategy.append(
+                f"{analysis['viewed_not_shortlisted']} applications were viewed but not shortlisted. "
+                "Recruiters are reading your resume but not finding enough match — strengthen project descriptions."
+            )
+        if analysis["shortlisted"] > 0:
+            strategy.append(
+                f"You were shortlisted {analysis['shortlisted']} time(s) — "
+                "identify what those job descriptions had in common with your profile."
+            )
+
+        return {
+            "summary": {
+                "total_applied": analysis["total_applied"],
+                "shortlisted": analysis["shortlisted"],
+                "shortlist_rate": f"{round(analysis['shortlisted'] / max(analysis['total_applied'], 1) * 100, 1)}%",
+                "average_match_score": analysis["average_match_score"],
+            },
+            "diagnosis": strategy,
+            "top_missing_skills": list(analysis["common_missing_skills"].items())[:10],
+            "resume_improvements": analysis["resume_suggestions"],
+            "profile_improvements": analysis["profile_suggestions"],
         }
 
 
@@ -475,6 +543,31 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["otp"],
             },
         ),
+        types.Tool(
+            name="analyze_rejections",
+            description=(
+                "Analyze your recent job applications to find rejection patterns. "
+                "Shows shortlist rate, which skills are commonly missing, "
+                "and whether the issue is ATS filtering or content gaps. "
+                "Run sync_application_statuses first for fresh data."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "since_days": {"type": "integer", "default": 30,
+                                   "description": "Look back this many days (default 30)"},
+                },
+            },
+        ),
+        types.Tool(
+            name="suggest_improvements",
+            description=(
+                "Generate specific resume and Naukri profile improvement suggestions "
+                "based on skills gaps found across all rejected applications. "
+                "Returns ranked list of missing skills and actionable edits."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
@@ -523,6 +616,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await s._debug_login()
         elif name == "submit_otp":
             result = await s._submit_otp(arguments["otp"])
+        elif name == "analyze_rejections":
+            result = await s._analyze_rejections(arguments.get("since_days", 30))
+        elif name == "suggest_improvements":
+            result = await s._suggest_improvements()
         else:
             result = {"error": f"Unknown tool: {name}"}
 
