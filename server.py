@@ -256,6 +256,16 @@ class NaukriMCPServer:
             await self.tracker.mark_failed(job_id, str(e))
             return {"success": False, "error": str(e)}
 
+        # Handle apply-on-company-site result
+        if isinstance(result, dict) and result.get("apply_on_company_site"):
+            await self.tracker.update_status(job_id, "applied_externally")
+            return {
+                "success": True,
+                "apply_on_company_site": True,
+                "external_url": result["external_url"],
+                "message": result["message"],
+            }
+
         # Questionnaire required — auto-answer from candidate profile first
         if isinstance(result, dict) and result.get("needs_questionnaire"):
             questions = result.get("questions", [])
@@ -315,6 +325,74 @@ class NaukriMCPServer:
         except NaukriError as e:
             await self.tracker.mark_failed(job_id, str(e))
             return {"success": False, "error": str(e)}
+
+    async def _bulk_apply(self, job_ids: list[str] | None = None) -> dict:
+        """
+        Apply to all approved jobs (or a specific list).
+        Auto-answers questionnaires from candidate profile.
+        Returns a summary report.
+        """
+        if job_ids:
+            jobs = [await self.tracker.get_job(jid) for jid in job_ids]
+            jobs = [j for j in jobs if j and j.status == "approved"]
+        else:
+            jobs = await self.tracker.list_jobs(status="approved")
+
+        if not jobs:
+            return {"message": "No approved jobs to apply to. Use approve_job first.", "results": []}
+
+        results = []
+        for job in jobs:
+            try:
+                outcome = await self._apply_job(job.id, dry_run=False)
+                results.append({
+                    "job_id": job.id,
+                    "company": job.company,
+                    "title": job.title,
+                    "outcome": "applied" if outcome.get("success") else "failed",
+                    "detail": outcome,
+                })
+            except Exception as e:
+                results.append({
+                    "job_id": job.id,
+                    "company": job.company,
+                    "title": job.title,
+                    "outcome": "error",
+                    "detail": str(e),
+                })
+
+        applied = [r for r in results if r["outcome"] == "applied"]
+        # Questionnaire-required: _apply_job returns needs_questionnaire=True — not a failure
+        questionnaire_needed = [
+            r for r in results
+            if isinstance(r.get("detail"), dict) and r["detail"].get("needs_questionnaire")
+        ]
+        # Company-site redirects
+        external = [
+            r for r in results
+            if isinstance(r.get("detail"), dict) and r["detail"].get("apply_on_company_site")
+        ]
+        failed = [
+            r for r in results
+            if r["outcome"] in ("failed", "error")
+            and r not in questionnaire_needed
+            and r not in external
+        ]
+
+        return {
+            "total": len(results),
+            "applied": len(applied),
+            "failed": len(failed),
+            "apply_on_company_site": len(external),
+            "needs_manual_questionnaire": len(questionnaire_needed),
+            "results": results,
+            "summary": (
+                f"{len(applied)}/{len(results)} applications submitted. "
+                f"{len(external)} require manual action on company site. "
+                f"{len(questionnaire_needed)} have unresolved questionnaire questions. "
+                f"{len(failed)} failed."
+            ),
+        }
 
     async def _get_applied_jobs(
         self, status: str | None, since_date: str | None, limit: int
@@ -568,6 +646,24 @@ async def list_tools() -> list[types.Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
+        types.Tool(
+            name="bulk_apply",
+            description=(
+                "Apply to all approved jobs in one command. "
+                "Auto-answers common recruiter questions from your candidate profile. "
+                "Pass job_ids to apply to specific jobs, or omit to apply to all approved jobs."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific job IDs to apply to (optional — omit for all approved)",
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -620,6 +716,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await s._analyze_rejections(arguments.get("since_days", 30))
         elif name == "suggest_improvements":
             result = await s._suggest_improvements()
+        elif name == "bulk_apply":
+            result = await s._bulk_apply(arguments.get("job_ids"))
         else:
             result = {"error": f"Unknown tool: {name}"}
 

@@ -689,6 +689,31 @@ class NaukriClient:
     # Application status
     # ------------------------------------------------------------------ #
 
+    def _parse_apply_result(self, job_id: str, data: dict) -> dict:
+        """Parse apply API response and return structured result."""
+        jobs_list = data.get("jobs", [])
+        job_entry = next((j for j in jobs_list if str(j.get("jobId")) == job_id), {})
+        status_code = job_entry.get("status")
+
+        if status_code == 202:
+            # Apply on company site
+            external_url = job_entry.get("jdURL") or job_entry.get("redirectURL") or ""
+            return {
+                "apply_on_company_site": True,
+                "external_url": external_url,
+                "job_id": job_id,
+                "message": f"This job requires applying on the company site: {external_url}",
+            }
+
+        if status_code == 409001 or data.get("applyStatus", {}).get(job_id) == 409001:
+            raise NaukriError(f"Already applied to job {job_id}")
+
+        if status_code is not None and status_code != 200:
+            msg = job_entry.get("message", "Unknown error")
+            raise NaukriError(f"Apply failed: {msg}")
+
+        return {"success": True}
+
     def _parse_recruiter_status(self, entry: dict) -> str:
         """Normalize Naukri applyStatus string to our internal status."""
         raw = (entry.get("applyStatus") or entry.get("status") or "").lower()
