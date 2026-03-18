@@ -40,3 +40,13 @@ class NaukriProfile(BaseModel):
     skills: list[str] = Field(default_factory=list)
     experience: list[dict[str, Any]] = Field(default_factory=list)
     education: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CandidateProfile(BaseModel):
+    current_ctc: float          # e.g. 8.0 (LPA)
+    expected_ctc: float         # e.g. 14.0
+    notice_period_days: int     # e.g. 60
+    total_experience_years: float  # e.g. 4.0
+    current_location: str       # e.g. "Faridabad"
+    willing_to_relocate: bool   # True
+    skills: list[str] = Field(default_factory=list)

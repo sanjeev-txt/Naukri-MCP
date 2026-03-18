@@ -92,3 +92,23 @@ def test_job_extra_fields_settable():
     )
     assert job.applied_at is not None
     assert job.resume_used == "/path/to/resume.pdf"
+
+
+def test_candidate_profile_defaults():
+    from models import CandidateProfile
+    p = CandidateProfile(
+        current_ctc=8, expected_ctc=14, notice_period_days=60,
+        total_experience_years=4, current_location="Faridabad",
+        willing_to_relocate=True,
+    )
+    assert p.current_ctc == 8.0
+    assert p.skills == []
+
+def test_candidate_profile_with_skills():
+    from models import CandidateProfile
+    p = CandidateProfile(
+        current_ctc=8, expected_ctc=14, notice_period_days=60,
+        total_experience_years=4, current_location="Faridabad",
+        willing_to_relocate=True, skills=["Python", "FastAPI"],
+    )
+    assert "Python" in p.skills
