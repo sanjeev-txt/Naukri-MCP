@@ -301,6 +301,34 @@ class NaukriMCPServer:
         jobs = await self.tracker.list_jobs(status=status, since_date=since_date, limit=limit)
         return [j.model_dump(mode="json") for j in jobs]
 
+    async def _sync_application_statuses(self) -> dict:
+        """Poll Naukri for recruiter status on all applied jobs and update tracker."""
+        applied_jobs = await self.tracker.get_applied_jobs_for_sync()
+        if not applied_jobs:
+            return {"message": "No applied jobs to sync.", "updated": []}
+
+        job_ids = [j.id for j in applied_jobs]
+        statuses = await self.browser.fetch_application_statuses(job_ids)
+
+        updated = []
+        for job in applied_jobs:
+            new_status = statuses.get(job.id)
+            if new_status and new_status != job.recruiter_status:
+                await self.tracker.update_recruiter_status(job.id, new_status)
+                updated.append({
+                    "job_id": job.id,
+                    "company": job.company,
+                    "title": job.title,
+                    "old_status": job.recruiter_status or "unknown",
+                    "new_status": new_status,
+                })
+
+        return {
+            "total_checked": len(applied_jobs),
+            "updated": updated,
+            "message": f"Synced {len(applied_jobs)} applications. {len(updated)} status change(s) found.",
+        }
+
 
 _server_instance: NaukriMCPServer | None = None
 
@@ -423,6 +451,15 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="sync_application_statuses",
+            description=(
+                "Poll Naukri for recruiter status on all your applied jobs "
+                "(Viewed / Shortlisted / Rejected / Expired). "
+                "Run this 3-7 days after applying to see recruiter activity."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
             name="debug_login",
             description="Check Naukri session status and connectivity. Use this when login fails.",
             inputSchema={"type": "object", "properties": {}},
@@ -480,6 +517,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await s._submit_questionnaire(
                 arguments["job_id"], arguments["answers"]
             )
+        elif name == "sync_application_statuses":
+            result = await s._sync_application_statuses()
         elif name == "debug_login":
             result = await s._debug_login()
         elif name == "submit_otp":
