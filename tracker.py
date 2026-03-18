@@ -34,6 +34,16 @@ class JobTracker:
                 error_message   TEXT
             )
         """)
+        for col_sql in [
+            "ALTER TABLE jobs ADD COLUMN recruiter_status TEXT",
+            "ALTER TABLE jobs ADD COLUMN status_checked_at DATETIME",
+            "ALTER TABLE jobs ADD COLUMN skills_gap TEXT",
+            "ALTER TABLE jobs ADD COLUMN match_score INTEGER",
+        ]:
+            try:
+                await self._conn.execute(col_sql)
+            except Exception:
+                pass  # column already exists
         await self._conn.commit()
 
     async def close(self):
@@ -108,12 +118,38 @@ class JobTracker:
             row = await cursor.fetchone()
         return row is not None
 
+    async def update_recruiter_status(self, job_id: str, recruiter_status: str):
+        await self._conn.execute(
+            "UPDATE jobs SET recruiter_status = ?, status_checked_at = ? WHERE id = ?",
+            (recruiter_status, datetime.now().isoformat(), job_id)
+        )
+        await self._conn.commit()
+
+    async def get_applied_jobs_for_sync(self) -> list[Job]:
+        """Return all jobs with status='applied' for status polling."""
+        async with self._conn.execute(
+            "SELECT * FROM jobs WHERE status = 'applied' ORDER BY applied_at DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_job(r) for r in rows]
+
+    async def save_skills_gap(self, job_id: str, gap_skills: list[str], match_score: int):
+        await self._conn.execute(
+            "UPDATE jobs SET skills_gap = ?, match_score = ? WHERE id = ?",
+            (json.dumps(gap_skills), match_score, job_id)
+        )
+        await self._conn.commit()
+
     def _row_to_job(self, row) -> Job:
         data = dict(row)
         data["skills_required"] = json.loads(data["skills_required"] or "[]")
         data["found_at"] = datetime.fromisoformat(data["found_at"])
         if data.get("applied_at"):
             data["applied_at"] = datetime.fromisoformat(data["applied_at"])
+        if data.get("status_checked_at"):
+            data["status_checked_at"] = datetime.fromisoformat(data["status_checked_at"])
+        raw_gap = data.get("skills_gap")
+        data["skills_gap"] = json.loads(raw_gap) if raw_gap else []
         return Job(
             id=data["id"],
             title=data["title"],
@@ -127,4 +163,9 @@ class JobTracker:
             applied_at=data.get("applied_at"),
             resume_used=data.get("resume_used"),
             error_message=data.get("error_message"),
+            # New v2 fields
+            recruiter_status=data.get("recruiter_status"),
+            status_checked_at=data.get("status_checked_at"),
+            skills_gap=data["skills_gap"],
+            match_score=data.get("match_score"),
         )

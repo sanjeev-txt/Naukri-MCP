@@ -17,6 +17,10 @@ class Job(BaseModel):
     applied_at: datetime | None = None
     resume_used: str | None = None
     error_message: str | None = None
+    recruiter_status: str | None = None   # 'viewed'|'shortlisted'|'rejected'|'expired'
+    status_checked_at: datetime | None = None
+    skills_gap: list[str] = Field(default_factory=list)
+    match_score: int | None = None
 
 
 class JobDetail(Job):
