@@ -685,6 +685,53 @@ class NaukriClient:
         self._applications_this_session += 1
         return True
 
+    # ------------------------------------------------------------------ #
+    # Application status
+    # ------------------------------------------------------------------ #
+
+    def _parse_recruiter_status(self, entry: dict) -> str:
+        """Normalize Naukri applyStatus string to our internal status."""
+        raw = (entry.get("applyStatus") or entry.get("status") or "").lower()
+        if "shortlist" in raw:
+            return "shortlisted"
+        if "reject" in raw or "not select" in raw:
+            return "rejected"
+        if "view" in raw or "seen" in raw:
+            return "viewed"
+        if "expir" in raw or "closed" in raw:
+            return "expired"
+        return "applied"
+
+    async def fetch_application_statuses(self, job_ids: list[str]) -> dict[str, str]:
+        """
+        Fetch current recruiter status for a list of applied job IDs.
+        Returns {job_id: recruiter_status}.
+        Uses APPLY_HISTORY_URL constant (already in naukri.py).
+        """
+        await self.login()
+        try:
+            data = await self._get(
+                APPLY_HISTORY_URL,
+                params={"appPage": 1, "pageSize": 200},
+            )
+        except Exception as e:
+            raise NaukriError(f"Could not fetch apply history: {e}")
+
+        applications = (
+            data.get("jobApplyList")
+            or data.get("applications")
+            or data.get("data")
+            or []
+        )
+
+        id_set = set(str(j) for j in job_ids)
+        result = {}
+        for app in applications:
+            jid = str(app.get("jobId") or app.get("id") or "")
+            if jid in id_set:
+                result[jid] = self._parse_recruiter_status(app)
+        return result
+
 
 # Alias so server.py import works unchanged
 NaukriBrowser = NaukriClient
