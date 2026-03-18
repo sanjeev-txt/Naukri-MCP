@@ -153,7 +153,7 @@ class NaukriMCPServer:
             return {"success": False, "error": f"Already applied to job {job_id}"}
 
         try:
-            success = await self.browser.apply_to_job(job.url, dry_run=dry_run)
+            result = await self.browser.apply_to_job(job.url, dry_run=dry_run)
         except CaptchaError as e:
             await self.tracker.mark_failed(job_id, str(e))
             return {"success": False, "error": str(e)}
@@ -161,18 +161,41 @@ class NaukriMCPServer:
             await self.tracker.mark_failed(job_id, str(e))
             return {"success": False, "error": str(e)}
 
-        if not dry_run and success:
+        # Questionnaire required — return questions to caller (Claude) to answer
+        if isinstance(result, dict) and result.get("needs_questionnaire"):
+            return result
+
+        if not dry_run and result:
             resume_used = job.__dict__.get("resume_used")
             await self.tracker.mark_applied(job_id, resume_used)
 
         return ApplicationResult(
             job_id=job_id,
-            success=success,
+            success=bool(result),
             resume_used=None,
             used_tailored_resume=False,
-            error=None if success else "Application button not found",
+            error=None if result else "Application button not found",
             applied_at=datetime.now(),
         ).model_dump(mode="json")
+
+    async def _submit_questionnaire(self, job_id: str, answers: dict) -> dict:
+        job = await self.tracker.get_job(job_id)
+        if not job:
+            return {"success": False, "error": f"Job {job_id} not found"}
+        try:
+            await self.browser.submit_questionnaire(job_id, answers, job.url)
+            await self.tracker.mark_applied(job_id, None)
+            return ApplicationResult(
+                job_id=job_id,
+                success=True,
+                resume_used=None,
+                used_tailored_resume=False,
+                error=None,
+                applied_at=datetime.now(),
+            ).model_dump(mode="json")
+        except NaukriError as e:
+            await self.tracker.mark_failed(job_id, str(e))
+            return {"success": False, "error": str(e)}
 
     async def _get_applied_jobs(
         self, status: str | None, since_date: str | None, limit: int
@@ -280,6 +303,28 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="submit_questionnaire",
+            description=(
+                "Submit answers to a job's screening questionnaire. Call this after apply_job "
+                "returns needs_questionnaire=true. Answer each question using the candidate profile; "
+                "ask the user for anything ambiguous before calling this tool. "
+                "answers is a dict of {questionId: answerValue} where answerValue is the option KEY "
+                "(e.g. '3') for Radio Button / List Menu questions, or free text for Text Box."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "answers": {
+                        "type": "object",
+                        "description": "Map of questionId → answer value",
+                        "additionalProperties": {"type": "string"},
+                    },
+                },
+                "required": ["job_id", "answers"],
+            },
+        ),
+        types.Tool(
             name="debug_login",
             description="Check Naukri session status and connectivity. Use this when login fails.",
             inputSchema={"type": "object", "properties": {}},
@@ -332,6 +377,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await s._get_applied_jobs(
                 arguments.get("status"), arguments.get("since_date"),
                 arguments.get("limit", 50),
+            )
+        elif name == "submit_questionnaire":
+            result = await s._submit_questionnaire(
+                arguments["job_id"], arguments["answers"]
             )
         elif name == "debug_login":
             result = await s._debug_login()
