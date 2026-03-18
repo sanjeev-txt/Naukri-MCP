@@ -8,7 +8,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 
-from models import Job, ApplicationResult
+from models import Job, ApplicationResult, CandidateProfile
 from naukri import NaukriClient as NaukriBrowser, NaukriError, CaptchaError, LoginError, OTPRequiredError
 from resume_tailor import ResumeTailor
 from tracker import JobTracker
@@ -27,6 +27,15 @@ class NaukriMCPServer:
         self.tailor = ResumeTailor()
         self.base_resume_path = os.path.expanduser(os.getenv("BASE_RESUME_PATH", "./resume_base.pdf"))
         self._started = False
+        self.candidate_profile = CandidateProfile(
+            current_ctc=float(os.getenv("CANDIDATE_CURRENT_CTC", "0")),
+            expected_ctc=float(os.getenv("CANDIDATE_EXPECTED_CTC", "0")),
+            notice_period_days=int(os.getenv("CANDIDATE_NOTICE_DAYS", "60")),
+            total_experience_years=float(os.getenv("CANDIDATE_EXPERIENCE_YEARS", "0")),
+            current_location=os.getenv("CANDIDATE_LOCATION", ""),
+            willing_to_relocate=os.getenv("CANDIDATE_WILLING_TO_RELOCATE", "true").lower() == "true",
+            skills=[s.strip() for s in os.getenv("CANDIDATE_SKILLS", "").split(",") if s.strip()],
+        )
 
     async def start(self):
         await self.tracker.init()
