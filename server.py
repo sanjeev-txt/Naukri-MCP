@@ -147,6 +147,71 @@ class NaukriMCPServer:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def _auto_answer_question(self, question: dict) -> str | None:
+        """
+        Auto-answer a recruiter screening question from candidate profile.
+        Returns answer string, or None if ambiguous/unknown.
+        """
+        p = self.candidate_profile
+        q_text = (question.get("question") or "").lower()
+        q_type = question.get("type", "")
+        options = question.get("options") or []
+
+        # Helper: find radio option key by label match
+        def radio_key(label: str) -> str | None:
+            label_lower = label.lower()
+            for opt in options:
+                if label_lower in (opt.get("option") or "").lower():
+                    return str(opt.get("optionId") or opt.get("id") or "")
+            return None
+
+        # CTC questions
+        if any(k in q_text for k in ["current ctc", "current salary", "ctc in lacs", "ctc per annum"]):
+            if q_type in ("Text Box", "text"):
+                return str(int(p.current_ctc)) if p.current_ctc == int(p.current_ctc) else str(p.current_ctc)
+
+        if any(k in q_text for k in ["expected ctc", "expected salary", "salary expectation"]):
+            if q_type in ("Text Box", "text"):
+                return str(int(p.expected_ctc)) if p.expected_ctc == int(p.expected_ctc) else str(p.expected_ctc)
+
+        # Notice period
+        if any(k in q_text for k in ["notice period", "notice in days", "joining time"]):
+            if q_type in ("Text Box", "text"):
+                return str(p.notice_period_days)
+            # Radio: look for matching option
+            for opt in options:
+                opt_text = (opt.get("option") or "").lower()
+                if str(p.notice_period_days) in opt_text or "2 month" in opt_text and p.notice_period_days <= 60:
+                    return str(opt.get("optionId") or "")
+
+        # Experience questions
+        if any(k in q_text for k in ["years of experience", "experience do you have", "total experience", "how many years"]):
+            if q_type in ("Text Box", "text"):
+                exp = p.total_experience_years
+                return str(int(exp)) if exp == int(exp) else str(exp)
+            # Radio: find matching range
+            for opt in options:
+                opt_text = (opt.get("option") or "").lower()
+                if str(int(p.total_experience_years)) in opt_text:
+                    return str(opt.get("optionId") or "")
+
+        # Location / relocation
+        if any(k in q_text for k in ["relocat", "willing to move", "currently residing", "work from office", "onsite"]):
+            if q_type == "Radio Button":
+                if p.willing_to_relocate:
+                    return radio_key("yes") or radio_key("comfortable") or None
+                else:
+                    return radio_key("no") or None
+            if q_type in ("Text Box", "text"):
+                return p.current_location
+
+        # Current location / city
+        if any(k in q_text for k in ["current location", "current city", "where are you based"]):
+            if q_type in ("Text Box", "text"):
+                return p.current_location
+
+        return None  # Cannot auto-answer
+
     async def _apply_job(self, job_id: str, dry_run: bool) -> dict:
         job = await self.tracker.get_job(job_id)
         if not job:
@@ -170,9 +235,33 @@ class NaukriMCPServer:
             await self.tracker.mark_failed(job_id, str(e))
             return {"success": False, "error": str(e)}
 
-        # Questionnaire required — return questions to caller (Claude) to answer
+        # Questionnaire required — auto-answer from candidate profile first
         if isinstance(result, dict) and result.get("needs_questionnaire"):
-            return result
+            questions = result.get("questions", [])
+            auto_answers = {}
+            unanswered = []
+
+            for q in questions:
+                q_id = str(q.get("questionId") or q.get("id") or "")
+                ans = self._auto_answer_question(q)
+                if ans is not None:
+                    auto_answers[q_id] = ans
+                else:
+                    unanswered.append(q)
+
+            if not unanswered:
+                # Fully auto-answered — submit immediately
+                return await self._submit_questionnaire(job_id, auto_answers)
+            else:
+                # Return partial answers + questions Claude/user must answer
+                result["auto_answered"] = auto_answers
+                result["unanswered_questions"] = unanswered
+                result["message"] = (
+                    f"Auto-answered {len(auto_answers)} question(s). "
+                    f"{len(unanswered)} question(s) need your input. "
+                    "Call submit_questionnaire with job_id and merged answers dict."
+                )
+                return result
 
         if not dry_run and result:
             resume_used = job.__dict__.get("resume_used")
