@@ -579,12 +579,31 @@ class NaukriClient:
             headers=self._request_headers(apply_headers),
             cookies=self._cookies,
         )
+        # JWT token may have expired — force re-login and retry once
+        if resp.status_code == 401:
+            self._logged_in = False
+            await self._login_email_password()
+            resp = await self._client.post(
+                APPLY_URL, json={**base_payload, "flowtype": "show"},
+                headers=self._request_headers(apply_headers),
+                cookies=self._cookies,
+            )
         if resp.status_code not in (200, 201):
-            data = resp.json()
-            msg = data.get("message") or data.get("error") or str(data)
+            try:
+                err = resp.json()
+                msg = err.get("message") or err.get("error") or str(err)
+            except Exception:
+                msg = resp.text or f"HTTP {resp.status_code}"
             raise NaukriError(f"Apply failed ({resp.status_code}): {msg}")
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            # Empty body on 200 = successful apply with no questionnaire
+            if resp.status_code in (200, 201) and not resp.text.strip():
+                self._applications_this_session += 1
+                return True
+            raise NaukriError(f"Unexpected non-JSON apply response: {resp.text[:200]}")
 
         # Already-applied check
         apply_status = data.get("applyStatus", {})
@@ -663,12 +682,34 @@ class NaukriClient:
             headers=self._request_headers(apply_headers),
             cookies=self._cookies,
         )
+        # JWT token may have expired — force re-login and retry once
+        if resp.status_code == 401:
+            self._logged_in = False
+            await self._login_email_password()
+            resp = await self._client.post(
+                APPLY_URL,
+                json={
+                    **base_payload,
+                    "flowtype": "apply",
+                    "questionnaireResponse": {extracted_id: answers},
+                },
+                headers=self._request_headers(apply_headers),
+                cookies=self._cookies,
+            )
         if resp.status_code not in (200, 201):
-            data = resp.json()
-            msg = data.get("message") or data.get("error") or str(data)
+            try:
+                err = resp.json()
+                msg = err.get("message") or err.get("error") or str(err)
+            except Exception:
+                msg = resp.text or f"HTTP {resp.status_code}"
             raise NaukriError(f"Questionnaire submit failed ({resp.status_code}): {msg}")
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            if resp.status_code in (200, 201) and not resp.text.strip():
+                return True
+            raise NaukriError(f"Unexpected non-JSON questionnaire response: {resp.text[:200]}")
         apply_status = data.get("applyStatus", {})
         if apply_status.get(extracted_id) == 409001:
             raise NaukriError(f"Already applied to job {extracted_id}")

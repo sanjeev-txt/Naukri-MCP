@@ -168,9 +168,17 @@ class NaukriMCPServer:
         Returns answer string, or None if ambiguous/unknown.
         """
         p = self.candidate_profile
-        q_text = (question.get("question") or "").lower()
-        q_type = question.get("type", "")
-        options = question.get("options") or []
+        # Support both Naukri API field names (questionName/questionType/answerOption)
+        # and legacy field names (question/type/options)
+        q_text = (question.get("questionName") or question.get("question") or "").lower()
+        q_type = question.get("questionType") or question.get("type", "")
+        # answerOption is a dict {"0": "label", "1": "label"} in Naukri API
+        answer_option = question.get("answerOption") or question.get("options") or {}
+        options = (
+            [{"optionId": k, "option": v} for k, v in answer_option.items()]
+            if isinstance(answer_option, dict)
+            else answer_option
+        )
 
         # Helper: find radio option key by label match
         def radio_key(label: str) -> str | None:
