@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 import aiosqlite
-from models import Job
+from models import Job, ResumeVersion
 
 
 class JobTracker:
@@ -32,6 +32,19 @@ class JobTracker:
                 applied_at      DATETIME,
                 resume_used     TEXT,
                 error_message   TEXT
+            )
+        """)
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS resume_versions (
+                id                    TEXT PRIMARY KEY,
+                job_id                TEXT NOT NULL,
+                iteration             INTEGER NOT NULL,
+                file_path             TEXT NOT NULL,
+                score_before          REAL,
+                score_after           REAL,
+                selected_achievements TEXT,
+                created_at            DATETIME NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES jobs(id)
             )
         """)
         await self._conn.commit()
@@ -107,6 +120,84 @@ class JobTracker:
         ) as cursor:
             row = await cursor.fetchone()
         return row is not None
+
+    async def save_resume_version(self, version: ResumeVersion) -> None:
+        await self._conn.execute("""
+            INSERT OR REPLACE INTO resume_versions
+                (id, job_id, iteration, file_path, score_before, score_after,
+                 selected_achievements, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            version.id, version.job_id, version.iteration, version.file_path,
+            version.score_before, version.score_after,
+            json.dumps(version.selected_achievements),
+            version.created_at.isoformat(),
+        ))
+        await self._conn.commit()
+
+    async def get_resume_versions(self, job_id: str) -> list[ResumeVersion]:
+        async with self._conn.execute(
+            "SELECT * FROM resume_versions WHERE job_id = ? ORDER BY iteration",
+            (job_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_version(r) for r in rows]
+
+    async def get_best_resume(self, job_id: str) -> ResumeVersion | None:
+        async with self._conn.execute(
+            "SELECT * FROM resume_versions WHERE job_id = ? ORDER BY score_after DESC LIMIT 1",
+            (job_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return self._row_to_version(row) if row else None
+
+    async def get_iteration_count(self, job_id: str) -> int:
+        async with self._conn.execute(
+            "SELECT COUNT(*) FROM resume_versions WHERE job_id = ?", (job_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def get_application_stats(self) -> dict:
+        stats = {}
+        # Count by status
+        async with self._conn.execute(
+            "SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            stats[row["status"]] = row["cnt"]
+
+        # Average scores from resume_versions
+        async with self._conn.execute("""
+            SELECT
+                COUNT(*) as total_versions,
+                AVG(score_before) as avg_initial_score,
+                AVG(score_after) as avg_final_score,
+                AVG(iteration) as avg_iterations
+            FROM resume_versions
+        """) as cursor:
+            row = await cursor.fetchone()
+        if row and row["total_versions"]:
+            stats["total_versions"] = row["total_versions"]
+            stats["avg_initial_score"] = round(row["avg_initial_score"] or 0, 4)
+            stats["avg_final_score"] = round(row["avg_final_score"] or 0, 4)
+            stats["avg_iterations"] = round(row["avg_iterations"] or 0, 1)
+
+        return stats
+
+    def _row_to_version(self, row) -> ResumeVersion:
+        data = dict(row)
+        return ResumeVersion(
+            id=data["id"],
+            job_id=data["job_id"],
+            iteration=data["iteration"],
+            file_path=data["file_path"],
+            score_before=data.get("score_before"),
+            score_after=data.get("score_after"),
+            selected_achievements=json.loads(data.get("selected_achievements") or "[]"),
+            created_at=datetime.fromisoformat(data["created_at"]),
+        )
 
     def _row_to_job(self, row) -> Job:
         data = dict(row)

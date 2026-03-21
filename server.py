@@ -8,9 +8,10 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 
-from models import Job, ApplicationResult
+from models import Job, ApplicationResult, ResumeVersion
 from naukri import NaukriClient as NaukriBrowser, NaukriError, CaptchaError, LoginError, OTPRequiredError
 from resume_tailor import ResumeTailor
+from resume_scorer import ResumeScorer
 from tracker import JobTracker
 
 load_dotenv()
@@ -26,6 +27,9 @@ class NaukriMCPServer:
         )
         self.tailor = ResumeTailor()
         self.base_resume_path = os.path.expanduser(os.getenv("BASE_RESUME_PATH", "./resume_base.pdf"))
+        self.yaml_path = os.path.expanduser(os.getenv("MASTER_RESUME_YAML", "~/.naukri-mcp/master_resume.yaml"))
+        self.scorer: ResumeScorer | None = None  # lazy-init on first score call
+        self.max_iterations = int(os.getenv("MAX_TAILOR_ITERATIONS", "3"))
         self._started = False
 
     async def start(self):
@@ -89,54 +93,167 @@ class NaukriMCPServer:
                 updated.append(job.model_dump(mode="json"))
         return updated
 
+    def _get_scorer(self) -> ResumeScorer | None:
+        """Lazy-init scorer on first use."""
+        if self.scorer is None:
+            try:
+                self.scorer = ResumeScorer(self.yaml_path)
+            except FileNotFoundError:
+                return None
+        return self.scorer
+
     async def _get_resume_data(self, job_id: str) -> dict:
         """
-        Returns master resume text + Naukri profile + job description so that
-        Claude Code can tailor the resume natively (no separate API key needed).
-        After tailoring, call generate_and_upload_resume with the result.
+        Returns structured YAML resume data + job description + current score
+        so Claude can tailor the resume. After tailoring, call generate_resume.
         """
         job = await self.tracker.get_job(job_id)
         if not job:
             return {"error": f"Job {job_id} not found"}
 
-        master_text = self.tailor.extract_text(self.base_resume_path) if os.path.exists(self.base_resume_path) else ""
-        profile = await self.browser.get_profile()
+        # Load YAML
+        try:
+            resume_data = self.tailor.load_yaml(self.yaml_path)
+        except FileNotFoundError as e:
+            return {"error": str(e)}
+
+        # Get JD
         detail = await self.browser.get_job_details(job_id, job.url)
+        jd = detail.description if detail else job.title
+
+        # Get current score
+        scorer = self._get_scorer()
+        current_score = scorer.score(jd) if scorer else None
+
+        # Derive iteration from DB
+        iteration = await self.tracker.get_iteration_count(job_id) + 1
 
         return {
             "job_id": job_id,
             "job_title": job.title,
             "company": job.company,
-            "job_description": detail.description if detail else job.title,
-            "master_resume_text": master_text,
-            "naukri_profile": {
-                "headline": profile.headline,
-                "skills": profile.skills,
-                "experience": profile.experience,
-                "education": profile.education,
-            },
+            "job_description": jd,
+            "resume_data": resume_data,
+            "current_score": current_score.model_dump() if current_score else None,
+            "iteration": iteration,
             "instructions": (
-                "Please tailor the master_resume_text for this job. "
-                "Keep all facts truthful. Use ATS-friendly plain text with sections: "
-                "Summary, Skills, Experience, Education. "
-                "Then call generate_and_upload_resume with the tailored text."
+                "Select and reorder achievements from resume_data that best match "
+                "the job_description. Use missing_skills from current_score to guide "
+                "emphasis. Do NOT invent new achievements. You may adapt summary from "
+                "variants. Reorder skill categories to front-load most relevant. "
+                "Format output as plain text with sections: PROFESSIONAL SUMMARY, "
+                "TECHNICAL SKILLS, WORK EXPERIENCE, PROJECTS, EDUCATION. "
+                "Then call generate_resume with the tailored text."
             ),
         }
 
-    async def _generate_and_upload_resume(self, job_id: str, tailored_text: str) -> dict:
-        """Generate a PDF from Claude's tailored text and upload it to Naukri profile."""
+    async def _generate_resume(self, job_id: str, tailored_text: str) -> dict:
+        """Generate a PDF locally from Claude's tailored text. Does NOT upload."""
         try:
             resume_path = await self.tailor.generate_pdf(tailored_text, job_id)
+
+            # Save version to DB
+            iteration = await self.tracker.get_iteration_count(job_id) + 1
+            version = ResumeVersion(
+                id=f"{job_id}_v{iteration}",
+                job_id=job_id,
+                iteration=iteration,
+                file_path=resume_path,
+                created_at=datetime.now(),
+            )
+            await self.tracker.save_resume_version(version)
+
+            return {
+                "success": True,
+                "resume_path": resume_path,
+                "iteration": iteration,
+                "message": "Resume generated locally. Call score_resume_match to verify score, then upload_and_apply when ready.",
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e), "resume_path": None}
+
+    async def _score_resume_match(self, job_id: str, tailored_text: str | None = None) -> dict:
+        """Score resume against job description."""
+        job = await self.tracker.get_job(job_id)
+        if not job:
+            return {"error": f"Job {job_id} not found"}
+
+        # Get JD (from detail or cached description)
+        detail = await self.browser.get_job_details(job_id, job.url)
+        jd = detail.description if detail else job.title
+
+        scorer = self._get_scorer()
+        if not scorer:
+            return {"error": f"master_resume.yaml not found at {self.yaml_path}"}
+
+        result = scorer.score(jd, tailored_text=tailored_text)
+
+        # If scoring a tailored version, update the latest resume_version's score_after
+        if tailored_text:
+            versions = await self.tracker.get_resume_versions(job_id)
+            if versions:
+                latest = versions[-1]  # last by iteration order
+                if latest.score_after is None:
+                    latest.score_after = result.overall_score
+                    await self.tracker.save_resume_version(latest)
+
+        return result.model_dump()
+
+    async def _upload_and_apply(self, job_id: str) -> dict:
+        """Upload best-scoring resume to Naukri, then apply."""
+        job = await self.tracker.get_job(job_id)
+        if not job:
+            return {"success": False, "error": f"Job {job_id} not found"}
+
+        if job.status != "approved":
+            return {"success": False, "error": "Job must be approved before applying."}
+
+        if await self.tracker.is_duplicate(job_id):
+            return {"success": False, "error": f"Already applied to job {job_id}"}
+
+        # Get best resume version (or use base resume)
+        best = await self.tracker.get_best_resume(job_id)
+        resume_path = best.file_path if best else self.base_resume_path
+
+        # Upload resume to Naukri profile
+        try:
             uploaded = await self.browser.upload_resume(resume_path)
             if not uploaded:
                 return {
                     "success": False,
-                    "error": "Resume upload to Naukri failed. You can still apply with your existing profile resume.",
-                    "resume_path": resume_path,
+                    "error": "Resume upload failed. Applying with existing profile resume.",
                 }
-            return {"success": True, "resume_path": resume_path, "message": "Resume uploaded to Naukri profile."}
         except Exception as e:
+            return {"success": False, "error": f"Upload failed: {e}"}
+
+        # Apply
+        try:
+            result = await self.browser.apply_to_job(job.url, dry_run=False)
+        except CaptchaError as e:
+            await self.tracker.mark_failed(job_id, str(e))
             return {"success": False, "error": str(e)}
+        except NaukriError as e:
+            await self.tracker.mark_failed(job_id, str(e))
+            return {"success": False, "error": str(e)}
+
+        # Questionnaire required
+        if isinstance(result, dict) and result.get("needs_questionnaire"):
+            return result
+
+        await self.tracker.mark_applied(job_id, resume_path)
+
+        return ApplicationResult(
+            job_id=job_id,
+            success=bool(result),
+            resume_used=resume_path,
+            used_tailored_resume=best is not None,
+            error=None if result else "Application button not found",
+            applied_at=datetime.now(),
+        ).model_dump(mode="json")
+
+    async def _get_application_stats(self) -> dict:
+        """Return session application statistics."""
+        return {"session_stats": await self.tracker.get_application_stats()}
 
     async def _apply_job(self, job_id: str, dry_run: bool) -> dict:
         job = await self.tracker.get_job(job_id)
@@ -259,7 +376,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_resume_data",
-            description="Fetch master resume text + Naukri profile + job description so Claude can tailor the resume. Call this before generate_and_upload_resume.",
+            description="Fetch structured YAML resume data + job description + current score so Claude can tailor the resume. Call this before generate_resume.",
             inputSchema={
                 "type": "object",
                 "properties": {"job_id": {"type": "string"}},
@@ -267,8 +384,8 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="generate_and_upload_resume",
-            description="Generate a PDF from Claude's tailored resume text and upload it to Naukri profile.",
+            name="generate_resume",
+            description="Generate a PDF from Claude's tailored resume text. Does NOT upload — call upload_and_apply after scoring.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -279,8 +396,36 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="score_resume_match",
+            description="Score resume against a job's description. Returns match score, matched/missing skills, and recommendation (skip/tailor/apply_directly). Call get_job_details first to fetch the JD.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                    "tailored_text": {"type": "string", "description": "Optional: score this text instead of master resume"},
+                },
+                "required": ["job_id"],
+            },
+        ),
+        types.Tool(
+            name="upload_and_apply",
+            description="Upload the best-scoring resume version to Naukri and submit the application. Call after the score->tailor->score loop is complete.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string"},
+                },
+                "required": ["job_id"],
+            },
+        ),
+        types.Tool(
+            name="get_application_stats",
+            description="Get session statistics: total scored, applied, skipped, average scores, average iterations.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
             name="apply_job",
-            description="Submit application for an approved job. Call after generate_and_upload_resume (or directly to apply with existing Naukri profile resume).",
+            description="Submit application for an approved job. Call after upload_and_apply (or directly to apply with existing Naukri profile resume).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -364,10 +509,18 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             result = await s._approve_jobs(arguments["job_ids"])
         elif name == "get_resume_data":
             result = await s._get_resume_data(arguments["job_id"])
-        elif name == "generate_and_upload_resume":
-            result = await s._generate_and_upload_resume(
+        elif name == "generate_resume":
+            result = await s._generate_resume(
                 arguments["job_id"], arguments["tailored_text"]
             )
+        elif name == "score_resume_match":
+            result = await s._score_resume_match(
+                arguments["job_id"], arguments.get("tailored_text")
+            )
+        elif name == "upload_and_apply":
+            result = await s._upload_and_apply(arguments["job_id"])
+        elif name == "get_application_stats":
+            result = await s._get_application_stats()
         elif name == "apply_job":
             result = await s._apply_job(
                 arguments["job_id"],

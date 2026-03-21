@@ -579,12 +579,27 @@ class NaukriClient:
             headers=self._request_headers(apply_headers),
             cookies=self._cookies,
         )
+        # Retry once on 401 with a fresh login
+        if resp.status_code == 401:
+            self._logged_in = False
+            await self.login()
+            resp = await self._client.post(
+                APPLY_URL, json={**base_payload, "flowtype": "show"},
+                headers=self._request_headers(apply_headers),
+                cookies=self._cookies,
+            )
         if resp.status_code not in (200, 201):
-            data = resp.json()
-            msg = data.get("message") or data.get("error") or str(data)
+            try:
+                data = resp.json()
+                msg = data.get("message") or data.get("error") or str(data)
+            except (ValueError, json.JSONDecodeError):
+                msg = resp.text[:200] or f"Empty response (status {resp.status_code})"
             raise NaukriError(f"Apply failed ({resp.status_code}): {msg}")
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except (ValueError, json.JSONDecodeError):
+            raise NaukriError(f"Apply got empty response (status {resp.status_code}). Naukri may be rate-limiting.")
 
         # Already-applied check
         apply_status = data.get("applyStatus", {})

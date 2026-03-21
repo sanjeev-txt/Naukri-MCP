@@ -40,3 +40,35 @@ class NaukriProfile(BaseModel):
     skills: list[str] = Field(default_factory=list)
     experience: list[dict[str, Any]] = Field(default_factory=list)
     education: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ResumeScore(BaseModel):
+    overall_score: float
+    keyword_score: float
+    tfidf_score: float
+    matched_skills: list[str] = Field(default_factory=list)
+    missing_skills: list[str] = Field(default_factory=list)
+    gap_analysis: str
+    recommendation: str  # "skip" | "tailor" | "apply_directly"
+
+
+class ResumeVersion(BaseModel):
+    id: str  # Format: "{job_id}_v{iteration}"
+    job_id: str
+    iteration: int
+    file_path: str
+    score_before: float | None = None
+    score_after: float | None = None
+    selected_achievements: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
+class MasterResume(BaseModel):
+    """Pydantic validator for master_resume.yaml schema."""
+    meta: dict  # Required: name, email, phone
+    summary: dict  # Required: default, variants
+    skills: list[dict]  # Required: at least one category
+    experience: list[dict]  # Required: at least one entry
+    projects: list[dict] = Field(default_factory=list)
+    education: list[dict] = Field(default_factory=list)
+    certifications: list[dict] = Field(default_factory=list)

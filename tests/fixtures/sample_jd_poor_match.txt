@@ -1,0 +1,16 @@
+Senior iOS Developer
+
+We are looking for a Senior iOS Developer to build our mobile application.
+
+Requirements:
+- 5+ years of experience with Swift and Objective-C
+- Strong experience with UIKit and SwiftUI
+- Experience with Core Data and Realm databases
+- Familiarity with Xcode and Instruments profiling
+- Experience with App Store submission process
+- Knowledge of MVVM and Clean Architecture patterns
+
+Nice to have:
+- Experience with Flutter or React Native
+- AR/VR development experience
+- Machine Learning on-device experience

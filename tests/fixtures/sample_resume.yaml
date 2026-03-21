@@ -1,0 +1,59 @@
+meta:
+  name: "Test User"
+  email: "test@example.com"
+  phone: "+91-1234567890"
+  location: "Bangalore, India"
+
+summary:
+  default: "Senior Software Engineer with 4+ years building scalable backend systems using Node.js, TypeScript, PostgreSQL, Kafka, and AWS."
+  variants:
+    backend: "Backend engineer specializing in distributed systems and real-time data processing."
+    fullstack: "Full-stack developer with deep backend expertise and React.js frontend experience."
+
+skills:
+  - category: "Languages"
+    items: ["JavaScript", "TypeScript", "SQL"]
+  - category: "Frameworks"
+    items: ["NestJS", "Node.js", "Express.js", "React.js"]
+  - category: "Infrastructure"
+    items: ["Docker", "AWS", "Kafka", "Redis", "PostgreSQL", "MongoDB"]
+
+experience:
+  - company: "Acme Corp"
+    role: "SDE II"
+    dates: "2023 - Present"
+    location: "Remote"
+    achievements:
+      - id: "acme-kafka"
+        text: "Built real-time data pipeline processing 10M events/day using Kafka and Node.js."
+        tags: ["kafka", "node.js", "data-pipeline", "real-time", "backend"]
+      - id: "acme-microservices"
+        text: "Led migration from monolith to microservices architecture using NestJS and Docker."
+        tags: ["microservices", "nestjs", "docker", "architecture", "leadership"]
+      - id: "acme-aws"
+        text: "Deployed services on AWS with auto-scaling, reducing infra costs by 30%."
+        tags: ["aws", "devops", "scalability", "cost-optimization"]
+  - company: "Startup Inc"
+    role: "Backend Developer"
+    dates: "2021 - 2023"
+    location: "Bangalore"
+    achievements:
+      - id: "startup-api"
+        text: "Developed REST APIs serving 50k req/min using Express.js and PostgreSQL."
+        tags: ["express.js", "postgresql", "api", "performance", "backend"]
+      - id: "startup-redis"
+        text: "Implemented Redis caching layer reducing response times by 60%."
+        tags: ["redis", "caching", "performance", "backend"]
+
+projects:
+  - name: "Chat App"
+    tech: ["Node.js", "Socket.io", "React"]
+    achievements:
+      - id: "proj-chat"
+        text: "Built real-time chat with Socket.io supporting 10k concurrent connections."
+        tags: ["socket.io", "real-time", "websocket", "node.js"]
+
+education:
+  - degree: "B.Tech Computer Science"
+    institution: "Test University"
+    dates: "2017 - 2021"

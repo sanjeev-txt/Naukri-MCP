@@ -1,0 +1,22 @@
+Senior Backend Engineer
+
+We are looking for a Senior Backend Engineer to join our platform team.
+
+Requirements:
+- 4+ years of experience with Node.js and TypeScript
+- Strong experience with PostgreSQL and Redis
+- Experience with Kafka or similar message queue systems
+- Familiarity with Docker and AWS (EC2, S3, SQS)
+- Experience building microservices architecture
+- Knowledge of NestJS framework preferred
+- Experience with real-time data processing
+
+Nice to have:
+- Experience with Kubernetes
+- GraphQL knowledge
+- CI/CD pipeline experience
+
+Responsibilities:
+- Design and build scalable backend services
+- Optimize database queries and caching strategies
+- Collaborate with frontend and DevOps teams
