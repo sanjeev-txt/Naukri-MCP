@@ -84,6 +84,7 @@ class NaukriClient:
         self._logged_in = False
         self._otp_pending = False
         self._applications_this_session = 0
+        self._session_date = datetime.now().date()
         self._cookies: dict = {}
         self._auth_token: str | None = None
 
@@ -538,6 +539,11 @@ class NaukriClient:
     # ------------------------------------------------------------------ #
 
     async def apply_to_job(self, url: str, dry_run: bool = False) -> bool | dict:
+        # Reset counter if it's a new day
+        today = datetime.now().date()
+        if today != self._session_date:
+            self._applications_this_session = 0
+            self._session_date = today
         if self._applications_this_session >= self.max_applications:
             raise NaukriError(
                 f"Max applications per session ({self.max_applications}) reached."
